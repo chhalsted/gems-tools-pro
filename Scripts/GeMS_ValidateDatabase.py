@@ -82,7 +82,6 @@ import GeMS_Definition as gdef
 import topology as tp
 import requests
 from jinja2 import Environment, FileSystemLoader
-from osgeo import ogr
 
 # for debugging
 # from importlib import reload
@@ -93,7 +92,7 @@ from osgeo import ogr
 # values dictionary gets sent to report_template.jinja errors_template.jinja
 val = {}
 
-version_string = "GeMS_ValidateDatabase.py, version of 3/28/2024"
+version_string = "GeMS_ValidateDatabase.py, version of 02/19/2025"
 val["version_string"] = version_string
 val["datetime"] = time.asctime(time.localtime(time.time()))
 
@@ -201,8 +200,24 @@ def rule2_1(db_dict, is_gpkg):
     # first look for GeologicMap feature dataset
     if not is_gpkg:
         gmaps = [k for k, v in db_dict.items() if v["gems_equivalent"] == "GeologicMap"]
+
         if not gmaps:
-            errors.append(f'Feature dataset <span class="table">GeologicMap</span>')
+            # check first for the unlikely situation of a feature class or table being named with GeologicMap
+            # which results in empty "gems_equivalent" from db_object_dict()
+            fc_gmap = False
+            for n in [k for k in db_dict.keys() if "GeologicMap" in k]:
+                d_type = db_dict[n]["dataType"]
+                d_type = guf.camel_to_space(d_type).lower()
+
+                if not d_type == "FeatureDataset":
+                    errors.append(
+                        f"'GeologicMap' found in a {d_type} name. 'GeologicMap' is a GeMS-reserved term that can "
+                        "only be used in feature dataset names"
+                    )
+                    fc_gmap = True
+            if not fc_gmap:
+                errors.append(f'Feature dataset <span class="table">GeologicMap</span>')
+
         else:
             # check the spatial reference of each 'GeologicMap' feature dataset
             for gmap in gmaps:
@@ -284,7 +299,8 @@ def check_fields(db_dict, level, schema_extensions):
             for k, v in db_dict.items()
             if not v["gems_equivalent"] in req_tables
             and not v["gems_equivalent"] == ""
-            and not v["dataType"] in ("Topology", "Annotation", "FeatureDataset")
+            and not v["dataType"]
+            in ("Topology", "Annotation", "FeatureDataset", "Workspace")
         ]
         header = "3.1 Missing or mis-defined fields"
 
@@ -587,6 +603,7 @@ def glossary_check(db_dict, level, all_gloss_terms):
                 "RasterBand",
                 "RasterDataset",
                 "RelationshipClass",
+                "Workspace",
             )
             and not k == "GeoMaterialDict"
             and v["gems_equivalent"] not in req
@@ -662,6 +679,7 @@ def glossary_check(db_dict, level, all_gloss_terms):
                         "Topology",
                         "RasterBand",
                         "RasterDataset",
+                        "Workspace",
                     )
                     and not k == "GeoMaterialDict"
                 ]
@@ -743,10 +761,11 @@ def sources_check(db_dict, level, all_sources):
                 "Topology",
                 "RasterBand",
                 "RasterDataset",
+                "Workspace",
             )
             and not k in gdef.rule2_1_elements
         ]
-        # tables = [t for t in tables if not t in gdef.rule2_1_elements]
+
         missing_header = "3.6 Missing DataSources entries with the table and field in which they are found"
 
     missing_source_ids = [
@@ -758,13 +777,10 @@ def sources_check(db_dict, level, all_sources):
     gems_sources = list(set(values(db_dict, "DataSources", "DataSources_ID", "list")))
     missing = []
     for table in tables:
-        # special case where DescriptionSourceID in DMU can be null:
-        # if there is no MapUnit
-        if table == "DescriptionOfMapUnits":
-            where = "MapUnit IS NOT NULL"
-        else:
-            where = None
+        where = None
 
+        if not "fields" in db_dict[table]:
+            arcpy.AddMessage(f"fields not in {table}")
         ds_fields = [
             f.name
             for f in db_dict[table]["fields"]
@@ -775,7 +791,7 @@ def sources_check(db_dict, level, all_sources):
 
             for val in d_sources.values():
                 if val:
-                    # if "|" in val:
+                    # parse pipe-delimited source ids
                     for el in val.split("|"):
                         if not el.strip() in all_sources:
                             all_sources.append(el.strip())
@@ -802,7 +818,7 @@ def rule3_3(db_dict):
         k
         for k, v in db_dict.items()
         if not v["gems_equivalent"] == ""
-        and not v["dataType"] == "FeatureDataset"
+        and not v["dataType"] in ("FeatureDataset", "Workspace")
         and not v["gems_equivalent"] == "GeoMaterialDict"
     ]
 
@@ -1112,61 +1128,25 @@ def rule3_12(db_dict, gdb_path):
         "3.12 Duplicated _ID Values. Missing value indicates an empty string, i.e., one or more space or tabs",
         "duplicate_ids",
     ]
-    ds = ogr.Open(gdb_path)
     all_ids = [None]
     set_ids = []
-    for k in db_dict:
+    for k in [t for t, v in db_dict.items() if "fields" in v]:
         idf = f"{k}_ID"
-        sql = f"SELECT {idf} from {k}"
-        res = ds.ExecuteSQL(sql)
-        if res:
-            for row in res:
-                i = row.GetField(0)
-                if not i in all_ids:
-                    all_ids.append(i)
-                else:
-                    to_html = f"""
-                        <span class="table">{k}</span>, 
-                        <span class="field">{idf}</span>, 
-                        <span class="value">{i}</span>
-                        """
-                    set_ids.append(to_html)
+        if idf in [f.name for f in db_dict[k]["fields"]]:
+            with arcpy.da.SearchCursor(db_dict[k]["catalogPath"], idf) as cursor:
+                for row in cursor:
+                    if not row[0] in all_ids:
+                        all_ids.append(row[0])
+                    else:
+                        to_html = f"""
+                            <span class="table">{k}</span>, 
+                            <span class="field">{idf}</span>, 
+                            <span class="value">{row[0]}</span>
+                            """
+                        set_ids.append(to_html)
+
     if set_ids:
         duplicate_ids.extend((list(set(set_ids))))
-
-    # db_tables = [
-    #     k
-    #     for k, v in db_dict.items()
-    #     if any(v["concat_type"].endswith(n) for n in ("Table", "Feature Class"))
-    #     and not k == "GeoMaterialDict"
-    #     and not "Annotation" in v["concat_type"]
-    # ]
-    # for table in db_tables:
-    #     for f in [f.name for f in db_dict[table]["fields"]]:
-    #         if f == f"{table}_ID":
-    #             id_tables.append(table)
-
-    # all_ids = []
-    # for table in id_tables:
-    #     table_path = db_dict[table]["catalogPath"]
-    #     # need a tuple here because duplicated keys added to a dictionary
-    #     # are ignored. need to look for duplicate (_ID Value: table) pairs.
-    #     # that is, we won't use the values() method here like in other functions
-    #     table_ids = [
-    #         (r[0], table)
-    #         for r in arcpy.da.SearchCursor(table_path, f"{table}_ID")
-    #         if r[0]
-    #     ]
-    #     all_ids.extend(table_ids)
-    #     dup_ids = list(set([id for id in all_ids if all_ids.count(id) > 1]))
-
-    # if dup_ids:
-    #     to_html = [
-    #         f'<span class="value">{d[0]}</span> in table <span class="table">{d[1]}</span>'
-    #         for d in dup_ids
-    #         if not guf.is_bad_null(d[0])
-    #     ]
-    #     duplicate_ids.extend(to_html)
 
     return duplicate_ids
 
@@ -1699,9 +1679,21 @@ def main(argv):
         ap("No MapUnitPolys and ContactAndFaults pairs on which to check topology")
     else:
         # returns (level_2_errors, level_3_errors
-        topo_results = check_topology(db_dict, workdir, is_gpkg, rule2_1_results[1])
-        level_2_errors = topo_results[0]
-        level_3_errors = topo_results[1]
+        # arcpy.AddMessage(val["rule2_1"])
+        gmap_missing = False
+        for message in val["rule2_1"]:
+            if message == 'Feature dataset <span class="table">GeologicMap</span>':
+                gmap_missing = True
+
+        if gmap_missing:
+            level_2_errors = [
+                'Feature dataset <span class="table">GeologicMap</span> is missing. Topology not checked'
+            ]
+            level_3_errors = level_2_errors
+        else:
+            topo_results = check_topology(db_dict, workdir, is_gpkg, rule2_1_results[1])
+            level_2_errors = topo_results[0]
+            level_3_errors = topo_results[1]
 
     val["rule2_3"] = level_2_errors
 
