@@ -267,6 +267,9 @@ addLTYPE = sys.argv[10]
 forceExit = sys.argv[11]
 scratchws = sys.argv[12]
 saveIntermediate = sys.argv[13]
+schema = sys.argv[14]
+mapname = sys.argv[15]
+xsectDepth = float(sys.argv[16])      
 
 ##for arg in sys.argv:
 ##    addMsgAndPrint(str(arg))
@@ -291,14 +294,15 @@ if saveIntermediate == "true":
 else:
     saveIntermediate = False
 
-inFds = gdb + "/GeologicMap"
-outFds = gdb + "/CrossSection" + outFdsTag
+if getGDBType(gdb) == 'FileGDB':                                
+    inFds = gdb + "/GeologicMap"
+    outFds = gdb + "/CrossSection" + outFdsTag
 
-if arcpy.Exists(scratchws):
-    scratch = scratchws
-else:
-    scratch = outFds
-addMsgAndPrint("  Scratch directory is " + scratch)
+    if arcpy.Exists(scratchws):
+        scratch = scratchws
+    else:
+        scratch = outFds
+    addMsgAndPrint("  Scratch directory is " + scratch)
 
 arcpy.env.overwriteOutput = True
 
@@ -319,6 +323,158 @@ if i > 1:
 elif i == 0:
     addMsgAndPrint("OOPS! Mo arcs in " + xsLine)
     sys.exit()
+
+if getGDBType(gdb) == 'EGDB':
+    addMsgAndPrint("Executing in EGDB")
+    if scratchws =='#':
+        addMsgAndPrint("You must define a file geodatabase as a scratch workspace")
+        sys.exit()
+    
+    showPyMessage('Setting variables and layers')
+    scrfgdb = scratchws + '/'
+    arcpy.MakeFeatureLayer_management(xsLine,'lyr_Bedrock_Line_Features')
+    arcpy.management.CopyFeatures('lyr_Bedrock_Line_Features', scrfgdb + 'xsect_xsLine')
+    
+    fc_units = gdb + '/' + schema + '.GeologicMap/' + schema + '.MapUnitPolys'
+    arcpy.MakeFeatureLayer_management(fc_units,'lyr_Bedrock_Units',"MapName = '" + mapname + "'")
+    arcpy.management.CopyFeatures('lyr_Bedrock_Units', scrfgdb + 'xsect_xsMUP')
+    
+    fc_contacts = gdb + '/' + schema + '.GeologicMap/' + schema + '.ContactsAndFaults'
+    arcpy.MakeFeatureLayer_management(fc_contacts,'lyr_Bedrock_Contacts',"MapName = '" + mapname + "'")
+    arcpy.management.CopyFeatures('lyr_Bedrock_Contacts', scrfgdb + 'xsect_xsCAF')
+    
+    fc_xsect_units = gdb + '/' + schema + '.CrossSection' + outFdsTag + '/' + schema + '.CS' + outFdsTag + 'MapUnitPolys'
+    fc_xsect_caf = gdb + '/' + schema + '.CrossSection' + outFdsTag + '/' + schema + '.CS' + outFdsTag + 'ContactsAndFaults'
+    
+    showPyMessage('Extracting cross-section line')
+    arcpy.FeatureVerticesToPoints_management(in_features=scrfgdb + 'xsect_xsLine', out_feature_class=scrfgdb + 'xsect_start', point_location="START")
+    arcpy.FeatureVerticesToPoints_management(in_features=scrfgdb + 'xsect_xsLine', out_feature_class=scrfgdb + 'xsect_end', point_location="END")
+    arcpy.Near_analysis(in_features=scrfgdb + 'xsect_start', near_features=scrfgdb + 'xsect_end', search_radius="", location="NO_LOCATION", angle="ANGLE", method="PLANAR")
+    for row in arcpy.da.SearchCursor(scrfgdb + 'xsect_start',['NEAR_ANGLE']):
+        if row[0] >= 0 and row[0] <= 90:
+            spatialsort = 'LL'
+            coordpriority = 'LOWER_LEFT'
+        elif row[0] > 90 and row[0] <= 180:
+            spatialsort = 'LR'
+            coordpriority = 'LOWER_RIGHT'
+        elif row[0] > -180 and row[0] <= -90:
+            spatialsort = 'UR'
+            coordpriority = 'UPPER_RIGHT'
+        elif row[0] > -90 and row[0] < 0:
+            spatialsort = 'UL'
+            coordpriority = 'UPPER_LEFT'        
+
+    showPyMessage('Extracting intersecting units')
+    arcpy.Intersect_analysis(in_features= scrfgdb + 'xsect_xsLine' + " #;" + scrfgdb + 'xsect_xsMUP' + " #", out_feature_class=scrfgdb + 'xsect_units', join_attributes="ALL", cluster_tolerance="-1 Unknown", output_type="LINE")
+    arcpy.MultipartToSinglepart_management(in_features=scrfgdb + 'xsect_units', out_feature_class=scrfgdb + 'xsect_units_single')
+    arcpy.DeleteField_management(in_table=scrfgdb + 'xsect_units_single', drop_field="ORIG_FID")
+
+    showPyMessage('Generating points along cross-section')
+    arcpy.GeneratePointsAlongLines_management(Input_Features=scrfgdb + 'xsect_units_single', Output_Feature_Class=scrfgdb + 'xsect_pts', Point_Placement="DISTANCE", Distance="5 Meters", Percentage="", Include_End_Points="END_POINTS")
+    arcpy.DeleteField_management(in_table=scrfgdb + 'xsect_pts', drop_field="ORIG_FID")
+
+    showPyMessage('Intersecting contacts along cross-section')
+    arcpy.MakeFeatureLayer_management(scrfgdb + 'xsect_pts','lyr_xsect_pts')
+    arcpy.SelectLayerByLocation_management(in_layer='lyr_xsect_pts', overlap_type="INTERSECT", select_features=scrfgdb + 'xsect_xsCAF', search_distance="", selection_type="NEW_SELECTION", invert_spatial_relationship="NOT_INVERT")
+    arcpy.DeleteFeatures_management(in_features="lyr_xsect_pts")
+
+    arcpy.Intersect_analysis(in_features=scrfgdb + 'xsect_xsLine' + " #;" + scrfgdb + 'xsect_xsCAF' + " #", out_feature_class=scrfgdb + 'xsect_contacts', join_attributes="ALL", cluster_tolerance="-1 Unknown", output_type="POINT")
+    arcpy.MultipartToSinglepart_management(in_features=scrfgdb + 'xsect_contacts', out_feature_class=scrfgdb + 'xsect_contacts_single')
+    arcpy.DeleteField_management(in_table=scrfgdb + 'xsect_contacts_single', drop_field="ORIG_FID")
+    arcpy.Merge_management(inputs=scrfgdb + 'xsect_pts' + ';' + scrfgdb + 'xsect_contacts_single', output=scrfgdb + 'xsect_pts_all_geo')
+
+    showPyMessage('Creating route')
+    arcpy.sa.ExtractValuesToPoints(scrfgdb + 'xsect_pts_all_geo', dem, scrfgdb + 'xsect_pts_all_geo_elev', "NONE", "ALL")
+    arcpy.Sort_management(in_dataset=scrfgdb + 'xsect_pts_all_geo_elev', out_dataset=scrfgdb + 'xsect_pts_all_geo_elev_sort', sort_field="SHAPE ASCENDING", spatial_sort_method=spatialsort)
+
+    arcpy.CreateRoutes_lr(in_line_features=scrfgdb + 'xsect_xsLine', route_id_field="Symbol", out_feature_class=scrfgdb + 'xsect_route', measure_source="LENGTH", from_measure_field="", to_measure_field="", coordinate_priority=coordpriority, measure_factor="1", measure_offset="0", ignore_gaps="IGNORE", build_index="INDEX")
+
+    arcpy.LocateFeaturesAlongRoutes_lr(in_features=scrfgdb + 'xsect_pts_all_geo_elev_sort', in_routes=scrfgdb + 'xsect_route', route_id_field="Symbol", radius_or_tolerance="1 Meters", out_table=scrfgdb + 'xsect_route_data', out_event_properties="RID POINT MEAS", route_locations="FIRST", distance_field="DISTANCE", zero_length_events="ZERO", in_fields="FIELDS", m_direction_offsetting="M_DIRECTON")
+    arcpy.management.DeleteIdentical(scrfgdb + 'xsect_route_data', "MEAS", None, 0)
+    
+    showPyMessage('Making cross-section Unit features')
+    sr = arcpy.Describe(xsLine).spatialReference  #arcpy.SpatialReference(26919)
+    #add unit polygons
+    arcpy.CreateFeatureclass_management(scrfgdb,'xsect_Bedrock_XSection_Units','POLYGON',template=fc_xsect_units,spatial_reference=sr)
+    startPoly = True
+    startPoint = 0
+    recs = int(arcpy.GetCount_management(scrfgdb + 'xsect_route_data').getOutput(0))
+    i=0
+    unit = None
+    for row in arcpy.da.SearchCursor(scrfgdb + 'xsect_route_data',['MEAS','RASTERVALU','MapName','Symbol_1','MapUnit']):
+        i=i+1
+        #showPyMessage('{0}: {1}: {2}: {3}: {4}: {5}'.format(i, row[0], row[1], row[2], row[3], row[4]))
+        if unit != row[4] and i==1:  #new first point
+            #showPyMessage('new first point')
+            array = arcpy.Array(arcpy.Point(startPoint,-1 * xsectDepth))
+            array.add(arcpy.Point(startPoint,row[1] * vertEx))        
+            unit = row[4]
+            symbology = row[3]
+        elif unit == row[4] and i < recs:  #add point to current unit
+            #showPyMessage('add point to unit')
+            array.add(arcpy.Point(row[0],row[1] * vertEx))
+        elif unit != row[4] and i > 1:  #close previous unit and start next unit
+            #showPyMessage('end unit and start new unit')
+            array.add(arcpy.Point(row[0],row[1] * vertEx))
+            array.add(arcpy.Point(row[0],-1 * xsectDepth))
+            polygon = arcpy.Polygon(array,sr)
+            cursor = arcpy.da.InsertCursor(scrfgdb + 'xsect_Bedrock_XSection_Units', ['SHAPE@','MapName','Symbol','MapUnit','DrawOnMap','PublishData'])
+            cursor.insertRow([polygon,row[2],symbology,unit,'Yes','No'])
+            del cursor 
+            del array
+
+            array = arcpy.Array(arcpy.Point(row[0],-1 * xsectDepth))
+            array.add(arcpy.Point(row[0],row[1] * vertEx))        
+            unit = row[4]
+            symbology = row[3]
+        elif i == recs:   #close last unit
+            #showPyMessage('close last unit')
+            array.add(arcpy.Point(row[0],row[1] * vertEx))
+            array.add(arcpy.Point(row[0],-1 * xsectDepth))
+            polygon = arcpy.Polygon(array,sr)
+            cursor = arcpy.da.InsertCursor(scrfgdb + 'xsect_Bedrock_XSection_Units', ['SHAPE@','MapName','Symbol','MapUnit','DrawOnMap','PublishData'])
+            cursor.insertRow([polygon,row[2],symbology,unit,'Yes','No'])
+            del cursor        
+    arcpy.Append_management(scrfgdb + 'xsect_Bedrock_XSection_Units',fc_xsect_units,"NO_TEST","#")
+
+    showPyMessage('Making cross-section Contact features')
+    #add contact lines
+    arcpy.CreateFeatureclass_management(scrfgdb,'xsect_Bedrock_XSection_Lines','POLYLINE',template=fc_xsect_caf,spatial_reference=sr)
+    for row in arcpy.da.SearchCursor(scrfgdb + 'xsect_route_data',['MEAS','RASTERVALU','MapName','Symbol_1','MapUnit']):
+        if row[4] is None:
+            array = arcpy.Array(arcpy.Point(row[0],row[1] * vertEx))
+            array.add(arcpy.Point(row[0],-1 * xsectDepth))
+            polyline = arcpy.Polyline(array,sr)
+            cursor = arcpy.da.InsertCursor(scrfgdb + 'xsect_Bedrock_XSection_Lines', ['SHAPE@','MapName','Symbol','DrawOnMap','PublishData'])
+            cursor.insertRow([polyline,row[2],row[3],'Yes','No'])
+            del cursor
+    arcpy.Append_management(scrfgdb + 'xsect_Bedrock_XSection_Lines',fc_xsect_caf,"NO_TEST","#")
+
+    if not saveIntermediate:
+        showPyMessage('Deleting intermediate files')
+        arcpy.Delete_management(scrfgdb + 'xsect_xsCAF')
+        arcpy.Delete_management(scrfgdb + 'xsect_xsLine')
+        arcpy.Delete_management(scrfgdb + 'xsect_xsMUP')
+        arcpy.Delete_management(scrfgdb + 'xsect_contacts')
+        arcpy.Delete_management(scrfgdb + 'xsect_contacts_single')
+        arcpy.Delete_management(scrfgdb + 'xsect_end')
+        arcpy.Delete_management(scrfgdb + 'xsect_pts')
+        arcpy.Delete_management(scrfgdb + 'xsect_pts_all_geo')
+        arcpy.Delete_management(scrfgdb + 'xsect_pts_all_geo_elev')
+        arcpy.Delete_management(scrfgdb + 'xsect_pts_all_geo_elev_sort')
+        arcpy.Delete_management(scrfgdb + 'xsect_route')
+        arcpy.Delete_management(scrfgdb + 'xsect_route_data')
+        arcpy.Delete_management(scrfgdb + 'xsect_start')
+        arcpy.Delete_management(scrfgdb + 'xsect_units')
+        arcpy.Delete_management(scrfgdb + 'xsect_units_single')
+        arcpy.Delete_management(scrfgdb + 'xsect_Bedrock_XSection_Units')
+        arcpy.Delete_management(scrfgdb + 'xsect_Bedrock_XSection_Lines')
+        
+    addMsgAndPrint("EGDB Complete")
+    
+    arcpy.CheckInExtension('Spatial')
+    sys.exit()  
+
 
 ## make output fds if it doesn't exist
 #  set output fds spatial reference to input fds spatial reference
@@ -708,3 +864,85 @@ addMsgAndPrint("\n \nFinished successfully.")
 if forceExit:
     addMsgAndPrint("Forcing exit by raising ExecuteError")
     raise arcpy.ExecuteError
+
+
+
+
+
+
+
+#-------------------validation script----------
+import os
+from pathlib import Path
+sys.path.insert(1, os.path.join(os.path.dirname(__file__),'Scripts'))
+from GeMS_utilityFunctions import *
+
+class ToolValidator:
+  # Class to add custom behavior and properties to the tool and tool parameters.
+
+    def __init__(self):
+        # set self.params for use in other function
+        self.params = arcpy.GetParameterInfo()
+
+    def initializeParameters(self):
+        # Customize parameter properties. 
+        # This gets called when the tool is opened.
+        self.params[13].enabled = False
+        self.params[14].enabled = False         
+        self.params[15].enabled = False 
+        return
+
+    def updateParameters(self):
+        # Modify parameter values and properties.
+        # This gets called each time a parameter is modified, before 
+        # standard validation.    
+        gdb = self.params[0].valueAsText
+        if getGDBType(gdb) == 'EGDB':
+            self.params[1].enabled = False
+            self.params[2].enabled = False
+            self.params[5].value = "LOWER_LEFT"
+            self.params[5].enabled = False
+            self.params[8].value = 0
+            self.params[8].enabled = False
+            self.params[9].enabled = False
+            self.params[10].enabled = False
+            self.params[13].enabled = True    
+            self.params[14].enabled = True 
+            self.params[15].enabled = True 
+            
+            schemaList = []
+            arcpy.env.workspace = gdb  
+            datasets = arcpy.ListDatasets("*GeologicMap*", "Feature")	
+            for dataset in datasets:
+                schemaList.append(dataset.split('.')[0] + '.' + dataset.split('.')[1])
+            self.params[13].filter.list = sorted(set(schemaList))	
+
+            if self.params[13].value is not None and len(arcpy.ListTables(self.params[13].value + '.Domain_MapName')) == 1:
+                self.params[14].enabled = True
+                mapList = []
+                for row in arcpy.da.SearchCursor(gdb + '\\' + self.params[13].value + '.Domain_MapName',['code']):
+                    mapList.append(row[0])
+                self.params[14].filter.list = sorted(set(mapList))   
+            else:
+                self.params[14].enabled = False
+                self.params[14].value = None 
+        else:
+            self.params[1].enabled = True
+            self.params[2].enabled = True
+            self.params[5].enabled = True
+            self.params[8].enabled = True
+            self.params[9].enabled = True
+            self.params[10].enabled = True
+            self.params[13].enabled = False
+            self.params[14].enabled = False
+            self.params[15].enabled = False
+        return
+
+    def updateMessages(self):
+        # Customize messages for the parameters.
+        # This gets called after standard validation.
+        return
+
+    # def isLicensed(self):
+    #     # set tool isLicensed.
+    # return True               
