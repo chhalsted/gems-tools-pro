@@ -62,6 +62,9 @@ exemptedPrefixes = (
     "ed_",
 )  # prefixes that flag a feature class as not permanent data
 
+dbschema = ''
+dbschemafilter = '*'
+dbschemawhere = 'OBJECTID>0'
 
 def usage():
     print(
@@ -107,43 +110,44 @@ def idRoot(tb, rootCounter):
         return "X" + str(rootCounter) + "X", rootCounter
 
 
-def getPFKeys(table):
-    addMsgAndPrint(table)
+def getPFKeys(dbf, table):
+    #addMsgAndPrint(table)
     fields2 = arcpy.ListFields(table)
     fKeys = []
     pKey = ""
-    for field in fields2:
-        ### this assumes only 1 _ID field!
-        if field.name == table + "_ID":
-            pKey = field.name
-        else:
-            if field.name.find("ID") > 0 and field.type == "String":
-                fKeys.append(field.name)
-    addMsgAndPrint("  pKey: " + pKey)
-    addMsgAndPrint("  fKeys: " + str(fKeys))
+    if getGDBType(dbf) == 'FileGDB' or 'MapName' in [f.name for f in arcpy.ListFields(table)]:
+        for field in fields2:
+            ### this assumes only 1 _ID field!
+            if field.name == table.replace(dbschema,'') + "_ID":
+                pKey = field.name
+            else:
+                if field.name.find("ID") > 0 and field.type == "String":
+                    fKeys.append(field.name)
+        addMsgAndPrint("  pKey: " + pKey)
+        addMsgAndPrint("  fKeys: " + str(fKeys))
     return pKey, fKeys
 
 
 def inventoryDatabase(dbf, noSources):
     arcpy.env.workspace = dbf
-    tables = arcpy.ListTables()
+    tables = arcpy.ListTables(dbschemafilter)
     if noSources:  # then don't touch DataSource_ID values
         for tb in tables:
-            if tb == "DataSources":
+            if tb == "DataSources" or tb == dbschema + 'DataSources':
                 tables.remove(tb)
                 addMsgAndPrint("    skipping DataSources")
     for table in tables:
         addMsgAndPrint(" Table: " + table)
-        pKey, fKeys = getPFKeys(table)
+        pKey, fKeys = getPFKeys(dbf, table)
         fctbs.append([dbf, "", table, pKey, fKeys])
-    fdsets = arcpy.ListDatasets()
+    fdsets = arcpy.ListDatasets(dbschemafilter)
     for fdset in fdsets:
         arcpy.env.workspace = dbf + "/" + fdset
-        fcs = arcpy.ListFeatureClasses()
+        fcs = arcpy.ListFeatureClasses(dbschemafilter)
         for fc in fcs:
             addMsgAndPrint(" FC: " + fc)
             if doReID(fc):  # Does a check for exempted prefixes
-                pKey, fKeys = getPFKeys(fc)
+                pKey, fKeys = getPFKeys(dbf, fc)
                 fctbs.append([dbf, fdset, fc, pKey, fKeys])
 
 
@@ -156,7 +160,7 @@ def buildIdDict(table, sortKey, keyRoot, pKey, lastTime, useGUIDs):
     edit = arcpy.da.Editor(arcpy.env.workspace)
     edit.startEditing(False, True)
     edit.startOperation()
-    rows = arcpy.UpdateCursor(table, "", "", "", sortKey)
+    rows = arcpy.UpdateCursor(table, dbschemawhere, "", "", sortKey)
     n = 1
     for row in rows:
         oldID = row.getValue(pKey)
@@ -187,7 +191,7 @@ def reID(table, keyFields, lastTime, outfile):
     edit = arcpy.da.Editor(arcpy.env.workspace)
     edit.startEditing(False, True)
     edit.startOperation()
-    rows = arcpy.UpdateCursor(table)
+    rows = arcpy.UpdateCursor(table, dbschemawhere)
     n = 1
     row = next(rows)
     while row:
@@ -224,9 +228,7 @@ def main(lastTime, dbf, useGUIDs, noSources):
         arcpy.env.workspace = os.path.join(fctb[0], fctb[1])
         arcpy.AddMessage(arcpy.env.workspace)
         tabName = tableName = fctb[2]
-        pKey, fKeys = getPFKeys(
-            tableName
-        )  # Why does this have to be called again (already in inventorDatadase)
+        pKey, fKeys = getPFKeys(dbf, tableName)  # Why does this have to be called again (already in inventorDatadase)
         # TODO figure out the intention behind the next two line more - creates an error for me
         # if tableName == 'MapUnitPoints':
         #     pKey = 'MapUnitPolys_ID'
@@ -259,9 +261,7 @@ def main(lastTime, dbf, useGUIDs, noSources):
             prefix = idRt
         if pKey != "":
             if sortKey[:-2] in fieldNameList(tableName):
-                lastTime = buildIdDict(
-                    tableName, sortKey, prefix, pKey, lastTime, useGUIDs
-                )
+                lastTime = buildIdDict(tableName, sortKey, prefix, pKey, lastTime, useGUIDs)
             else:
                 addMsgAndPrint("Skipping " + tableName + ", no field " + sortKey[:-2])
 
@@ -284,9 +284,7 @@ def main(lastTime, dbf, useGUIDs, noSources):
         arcpy.env.workspace = fctb[0] + fctb[1]
         keyFields = fctb[4]
         # keyFields.append(fctb[3])
-        if (
-            fctb[3] != ""
-        ):  # primary key is identified as '' (i.e., doesn't exist, so not an NCGMP09 feature class)
+        if (fctb[3] != ""):  # primary key is identified as '' (i.e., doesn't exist, so not an NCGMP09 feature class)
             lastTime = reID(fctb[2], keyFields, lastTime, outfile)
     outfile.close()
     return lastTime
@@ -299,23 +297,92 @@ lastTime = time.time()
 useGUIDs = False
 addMsgAndPrint(versionString)
 
-if not os.path.exists(sys.argv[1]):
+if not os.path.exists(arcpy.GetParameterAsText(0)):
     usage()
 else:
     # lastTime = elapsedTime(lastTime)
-    if len(sys.argv) >= 3:
-        if sys.argv[2].upper() == "TRUE":
-            useGUIDs = True
-        else:
-            useGUIDs = False
-    if len(sys.argv) >= 4:
-        if sys.argv[3].upper() == "TRUE":
-            noSources = True
-        else:
-            noSources = False
+    #if len(sys.argv) >= 3:
+    if arcpy.GetParameterAsText(1).upper() == "TRUE":
+        useGUIDs = True
+    else:
+        useGUIDs = False
+    #if len(sys.argv) >= 4:
+    if arcpy.GetParameterAsText(2).upper() == "TRUE":
+        noSources = True
+    else:
+        noSources = False
 
     dbf = os.path.abspath(sys.argv[1])
+    if getGDBType(dbf) == 'EGDB':
+        dbschema = arcpy.GetParameterAsText(3) + '.'
+        dbschemafilter = dbschema + '*'
+        dbschemawhere = "MapName = '" + arcpy.GetParameterAsText(4) + "'"
+   
     arcpy.env.workspace = ""
     # lastTime = elapsedTime(lastTime)
     lastTime = main(lastTime, dbf, useGUIDs, noSources)
     lastTime = elapsedTime(startTime)
+
+
+
+
+#-------------------validation script----------
+import os,glob
+sys.path.insert(1, os.path.join(os.path.dirname(__file__),'Scripts'))
+from GeMS_utilityFunctions import *
+
+class ToolValidator:
+  # Class to add custom behavior and properties to the tool and tool parameters.
+    def __init__(self):
+        # set self.params for use in other function
+        self.params = arcpy.GetParameterInfo()
+
+    def initializeParameters(self):
+        # Customize parameter properties. 
+        # This gets called when the tool is opened.
+        self.params[3].enabled = False
+        self.params[4].enabled = False
+        return
+
+    def updateParameters(self):
+        # Modify parameter values and properties.
+        # This gets called each time a parameter is modified, before 
+        # standard validation.
+        gdb = self.params[0].valueAsText
+        if getGDBType(gdb) == 'EGDB':
+            self.params[3].enabled = True 
+            schemaList = []
+            arcpy.env.workspace = gdb  
+            datasets = arcpy.ListDatasets("*GeologicMap*", "Feature")	
+            for dataset in datasets:
+                schemaList.append(dataset.split('.')[0] + '.' + dataset.split('.')[1])
+            self.params[3].filter.list = sorted(set(schemaList))	
+
+            if self.params[3].value is not None and len(arcpy.ListTables(self.params[3].value + '.Domain_MapName')) == 1:  
+                self.params[4].enabled = True 
+                mapList = []
+                for row in arcpy.da.SearchCursor(gdb + '\\' + self.params[3].value + '.Domain_MapName',['code']):
+                    mapList.append(row[0])
+                self.params[4].filter.list = sorted(set(mapList)) 
+            else:
+                self.params[4].enabled = False
+                self.params[4].value = None
+            
+        else:
+            self.params[3].enabled = False
+            self.params[3].value = None
+            self.params[4].enabled = False
+            self.params[4].value = None            
+            
+            
+        return
+
+    def updateMessages(self):
+        # Customize messages for the parameters.
+        # This gets called after standard validation.
+        return
+
+    # def isLicensed(self):
+    #     # set tool isLicensed.
+    # return True
+            

@@ -517,3 +517,75 @@ class ToolValidator:
             
     return
     
+
+
+#-------------------validation script----------
+import os
+sys.path.insert(1, os.path.join(os.path.dirname(__file__),'Scripts'))
+from GeMS_utilityFunctions import *
+
+class ToolValidator:
+  """Class for validating a tool's parameter values and controlling
+  the behavior of the tool's dialog."""
+
+  def __init__(self):
+    """Setup arcpy and the list of tool parameters."""
+    import arcpy
+    self.params = arcpy.GetParameterInfo()
+
+  def initializeParameters(self):
+    """Refine the properties of a tool's parameters.  This method is
+    called when the tool is opened."""
+    self.params[1].enabled = False
+    self.params[2].enabled = False  
+    return
+
+  def updateParameters(self):
+    """Modify the values and properties of parameters before internal
+    validation is performed.  This method is called whenever a parmater
+    has been changed."""
+    gdb = os.path.dirname(self.params[0].valueAsText)
+    if getGDBType(gdb) == 'EGDB':
+        self.params[1].enabled = True    
+        db_schema = os.path.basename(self.params[0].valueAsText).split('.')[0] + '.' + os.path.basename(self.params[0].valueAsText).split('.')[1]
+
+        schemaList = []
+        arcpy.env.workspace = gdb  
+        datasets = arcpy.ListDatasets("*GeologicMap*", "Feature")	
+        for dataset in datasets:
+            schemaList.append(dataset.split('.')[0] + '.' + dataset.split('.')[1])
+        self.params[1].filter.list = sorted(set(schemaList))	
+
+        if self.params[1].value is not None and len(arcpy.ListTables(db_schema + '.Domain_MapName')) == 1:
+            self.params[2].enabled = True 
+            mapList = []
+            for row in arcpy.da.SearchCursor(gdb + '\\' + self.params[1].value + '.Domain_MapName',['code']):
+                mapList.append(row[0])
+            self.params[2].filter.list = sorted(set(mapList)) 
+        else:
+            self.params[2].enabled = False
+            self.params[2].value = None        
+    else:
+        self.params[1].enabled = False
+        self.params[1].value = None
+        self.params[2].enabled = False
+        self.params[2].value = None
+    return    
+
+  def updateMessages(self):
+    """Modify the messages created by internal validation for each tool
+    parameter.  This method is called after internal validation."""
+    dmu = self.params[0].valueAsText
+    # dmu = os.path.join(gdb, 'DescriptionOfMapUnits')
+    # if not arcpy.Exists(dmu):
+    #    m = "This geodatabase does not have a DescriptionOfMapUnits table"
+    #    self.params[0].setErrorMessage(m)
+    #else:
+    required = set(['MapUnit', 'Label', 'Name', 'Age', 'Description', 'ParagraphStyle', 'HierarchyKey'])
+    fields = set([f.name.lower() for f in arcpy.ListFields(dmu)])
+    missing = [n for n in required if n.lower() not in fields]
+    if len(missing) > 0:
+        m = f"Field(s) {', '.join(missing)} missing from DescriptionOfMapUnits"
+        self.params[0].setErrorMessage(m)
+            
+    return
